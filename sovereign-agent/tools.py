@@ -8,6 +8,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, NamedTuple
+from urllib.parse import parse_qsl, urlparse
 
 import requests
 from anthropic.types import ToolParam
@@ -91,6 +92,8 @@ def fetch_url(url: str) -> ToolResult:
     """Fetch a page and return its readable text, HTML stripped out."""
     if not url.startswith(("http://", "https://")):
         return ToolResult(False, "Error: url must start with http:// or https://")
+    if is_reddit(url):
+        return fetch_reddit(url)
     try:
         resp = requests.get(url, timeout=FETCH_TIMEOUT, headers={"User-Agent": USER_AGENT})
         resp.raise_for_status()
@@ -101,10 +104,63 @@ def fetch_url(url: str) -> ToolResult:
     for tag in soup(["script", "style", "nav", "header", "footer", "noscript"]):
         tag.decompose()
     text = re.sub(r"\n{3,}", "\n\n", soup.get_text("\n", strip=True))
+    return ToolResult(True, _trim(text) or "(the page had no readable text)")
 
+
+def _trim(text: str) -> str:
+    """Cap a fetched page so context stays manageable."""
     if len(text) > MAX_FETCH_CHARS:
-        text = text[:MAX_FETCH_CHARS] + f"\n\n[truncated at {MAX_FETCH_CHARS} chars]"
-    return ToolResult(True, text or "(the page had no readable text)")
+        return text[:MAX_FETCH_CHARS] + f"\n\n[truncated at {MAX_FETCH_CHARS} chars]"
+    return text
+
+
+# --- Reddit: the public .json endpoint instead of scraping HTML ---------------
+
+REDDIT_COMMENTS = 20       # top-level comments kept per post
+
+
+def is_reddit(url: str) -> bool:
+    host = urlparse(url).hostname or ""
+    return host == "reddit.com" or host.endswith(".reddit.com")
+
+
+def fetch_reddit(url: str) -> ToolResult:
+    """Read a Reddit post (title, body, top comments) or listing (post titles) via .json."""
+    parsed = urlparse(url)
+    api = f"https://www.reddit.com{parsed.path.rstrip('/') or '/r/all'}.json"
+    params = {"raw_json": 1, "limit": 50, "sort": "top", **dict(parse_qsl(parsed.query))}
+    try:
+        resp = requests.get(api, timeout=FETCH_TIMEOUT, headers={"User-Agent": USER_AGENT},
+                            params=params)
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError) as exc:
+        return ToolResult(False, f"Error fetching Reddit JSON for {url}: {exc}. Reddit "
+                                 f"may be blocking or rate-limiting; try another source.")
+
+    try:
+        return ToolResult(True, _trim(_reddit_text(data)) or "(no Reddit content)")
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        return ToolResult(False, f"Error: unexpected Reddit JSON shape for {url} ({exc!r}).")
+
+
+def _reddit_text(data) -> str:
+    """Readable text from a post ([post, comments]) or a listing (subreddit, search)."""
+    if isinstance(data, list) and len(data) == 2:
+        post = data[0]["data"]["children"][0]["data"]
+        comments = [c["data"] for c in data[1]["data"]["children"] if c.get("kind") == "t1"]
+        parts = [f"{post.get('title', '')}\n"
+                 f"r/{post.get('subreddit', '?')} · u/{post.get('author', '?')} · "
+                 f"{post.get('score', 0)} points · {post.get('num_comments', 0)} comments",
+                 post.get("selftext") or post.get("url", ""),
+                 f"--- Top comments ({min(len(comments), REDDIT_COMMENTS)}) ---"]
+        parts += [f"[{c.get('score', 0)}] u/{c.get('author', '?')}: {c.get('body', '')}"
+                  for c in comments[:REDDIT_COMMENTS]]
+    else:
+        posts = [c["data"] for c in data.get("data", {}).get("children", []) if c.get("kind") == "t3"]
+        parts = [f"[{p.get('score', 0)}] {p.get('title', '')}\n"
+                 f"https://www.reddit.com{p.get('permalink', '')}" for p in posts]
+    return "\n\n".join(p for p in parts if p)
 
 
 def write_report(title: str, markdown: str) -> ToolResult:

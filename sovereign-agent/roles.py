@@ -111,6 +111,10 @@ Rules:
 - Be exhaustive within your angle. Do not stop at the obvious or famous items;
   the long tail is the point. Keep searching until new searches stop turning up
   new items.
+- Search forums and communities, not just official pages: Reddit, Hacker News
+  (news.ycombinator.com) and specialised forums surface niche items that lists
+  miss. Run queries like "[topic] reddit", "[topic] hacker news" and
+  "[topic] list forum", and fetch the threads — comments often name items.
 - Every candidate needs a source_url: the page where you saw it named. Prefer
   the item's own site or an authoritative page about it; a list page that names
   it is acceptable.
