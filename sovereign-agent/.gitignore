@@ -1,0 +1,12 @@
+# Secrets — never commit your API key.
+.env
+
+# Virtual environment — recreate it locally, don't track it.
+.venv/
+
+# Python bytecode caches.
+__pycache__/
+*.py[cod]
+
+# Trace logs from each run.
+traces/
