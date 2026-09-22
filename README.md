@@ -3,6 +3,28 @@
 A self-contained AI agent built from scratch, one step at a time, to understand
 what an "AI agent" actually is under the hood.
 
+## The loop, at a glance
+
+```mermaid
+flowchart TD
+    Task([Task from the command line]) --> Think[Think it through]
+    Think --> Decide{Need to run code?}
+
+    Decide -->|Yes| Run[Run Python in a fresh subprocess]
+    Run --> Outcome{Did it work?}
+    Outcome -->|Output| Think
+    Outcome -->|Error or timeout| Diagnose[Read the error and diagnose the cause]
+    Diagnose --> Think
+
+    Decide -->|No| Verify[Verify the result]
+    Verify --> Complete([Declare TASK COMPLETE])
+
+    Diagnose -.->|same error 3x, or 10 turns| Stop([Stop early and report what blocked it])
+```
+
+Every arrow back to **Think** is the agent seeing what its last action actually
+did — including its own failures — and choosing the next one.
+
 ## What this is
 
 `sovereign-agent/agent.py` is a single-file AI agent. You give it a task on the
@@ -32,7 +54,7 @@ next one. Take the loop away and you have a chatbot again.
 
 ## What it can do
 
-The agent was built in five stages, each one still visible in the file:
+The agent was built in six stages, each one still visible in the file:
 
 1. **A single API call.** Send a task to Claude, print the reply. The baseline
    to build on.
@@ -52,6 +74,11 @@ The agent was built in five stages, each one still visible in the file:
    Guards keep it honest: it stops after 3 identical failures in a row or 10
    turns, and reports what it was stuck on rather than spinning. Unexpected
    errors are recorded as trace events instead of crashing the program.
+6. **An explicit stopping condition.** The agent works until the task is
+   genuinely done, verifies it, and declares `TASK COMPLETE` with a short
+   summary of what it accomplished. Every run ends with a labelled outcome —
+   *completed*, *stopped early*, *ended without a marker*, or *errored* — so a
+   real success is distinguishable from a run that merely stopped talking.
 
 > **Note:** `run_python` executes model-written code on your machine with your
 > permissions and no sandbox. Fine for local experimenting; don't point it at

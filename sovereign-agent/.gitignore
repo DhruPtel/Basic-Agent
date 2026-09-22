@@ -10,3 +10,6 @@ __pycache__/
 
 # Trace logs from each run.
 traces/
+
+# Saved analyst reports.
+reports/
