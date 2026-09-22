@@ -21,7 +21,7 @@ import anthropic
 from anthropic.types import Message, ToolParam, ToolResultBlockParam, ToolUseBlock
 from dotenv import load_dotenv
 
-from tools import Tool, ToolResult, error_signature, render_args
+from tools import Tool, ToolResult, brief_args, error_signature, render_args
 
 
 # --- Configuration ------------------------------------------------------------
@@ -34,6 +34,7 @@ MAX_REPEATED_ERRORS = 3    # stop after this many identical failures in a row
 
 COMPLETION_MARKER = "TASK COMPLETE"
 TRACE_DIR = Path(__file__).parent / "traces"
+VERBOSE = os.environ.get("VERBOSE", "") not in ("", "0")  # VERBOSE=1: full detail in quiet-by-default runs
 
 
 # --- Tracing ------------------------------------------------------------------
@@ -67,10 +68,14 @@ class Trace:
     # Checked in order; the first one present is shown under the heading.
     BODY_FIELDS = ("text", "thinking", "output")
 
-    def __init__(self, path: Path, label: str = "") -> None:
+    # Quiet mode prints only these, one line each; the file always gets everything.
+    QUIET_EVENTS = {"plan", "handoff", "handback", "merge", "report", "tool_call", "run_end"}
+
+    def __init__(self, path: Path, label: str = "", quiet: bool = False) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self.label = label
+        self.quiet = quiet
         self._file = path.open("w", encoding="utf-8")
 
     def record(self, event: str, **data) -> None:
@@ -83,6 +88,10 @@ class Trace:
 
     def _print(self, entry: dict) -> None:
         event = entry["event"]
+        if self.quiet:
+            return self._print_brief(entry) if event in self.QUIET_EVENTS else None
+        if event == "run_end":  # verbose output already showed the ending
+            return
         label = "TOOL ERROR" if entry.get("status") == "error" else self.LABELS.get(event, event.upper())
         if tool := entry.get("tool"):
             label += f": {tool}"
@@ -101,6 +110,23 @@ class Trace:
             if body:
                 print(textwrap.indent(body, "    "))
             print(flush=True)
+
+    def _print_brief(self, entry: dict) -> None:
+        """One milestone line, e.g. "[hunter-1] web_search (turn 3): 'query'"."""
+        prefix = f"[{self.label}] " if self.label else ""
+        if entry["event"] == "tool_call":
+            line = f"{entry['tool']} (turn {entry['turn']}): {brief_args(entry['tool'], entry['args'])}"
+        elif entry["event"] == "run_end":
+            line = entry["text"]
+        else:
+            line = self.LABELS[entry["event"]] + (f" {entry['peer']}" if entry.get("peer") else "")
+            text = entry.get("text", "")
+            if "\n" in text:  # e.g. the PLAN's list of angles
+                line += ":\n" + textwrap.indent(text, "    ")
+            elif text:
+                line += f": {text}"
+        with _print_lock:
+            print(prefix + line, flush=True)
 
     def close(self) -> None:
         self._file.close()
@@ -153,6 +179,8 @@ class Agent:
             self.trace.record("error", ending="error", text=summary,
                               detail=traceback.format_exc())
             ending = "error"
+        count = f" — {len(self.items)} items" if self.output_tool else ""
+        self.trace.record("run_end", ending=ending, items=len(self.items), text=ending + count)
         return RunResult(ending, summary, self.items)
 
     def _loop(self, task: str) -> tuple[str, str]:

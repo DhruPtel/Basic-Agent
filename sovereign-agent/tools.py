@@ -242,6 +242,15 @@ def render_args(name: str, args: dict) -> str:
     return " ".join(f"{k}={v!r}" for k, v in args.items())
 
 
+def brief_args(name: str, args: dict) -> str:
+    """A one-line glimpse of a call's arguments for quiet terminal output."""
+    if isinstance(items := args.get("items"), list):
+        return f"{len(items)} items"
+    value = args.get("query") or args.get("url") or args.get("title") or args.get("code") or ""
+    text = " ".join(str(value).split())
+    return repr(text[:100] + "…" if len(text) > 100 else text)
+
+
 def error_signature(output: str) -> str:
     """Last meaningful line of a failure — usually the exception and its message."""
     lines = [line.strip() for line in output.splitlines()

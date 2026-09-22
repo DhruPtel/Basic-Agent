@@ -16,7 +16,7 @@ from datetime import datetime
 
 import anthropic
 
-from agent import MODEL, TRACE_DIR, Agent, RunResult, Trace, make_client
+from agent import MODEL, TRACE_DIR, VERBOSE, Agent, RunResult, Trace, make_client
 from roles import make_hunter, make_verifier
 from tools import write_report
 
@@ -26,6 +26,7 @@ from tools import write_report
 NUM_HUNTERS = 2
 VERIFY_BATCH = 30          # candidates per verifier instance; keeps each context small
 MAX_PARALLEL = 3           # agents running at once
+QUIET = not VERBOSE        # milestones only in the terminal; traces keep full detail
 
 FALLBACK_ANGLES = [
     {"label": "Lists and directories",
@@ -126,7 +127,7 @@ class Orchestrator:
         self.client = client
         self.directive = directive
         self.run_dir = TRACE_DIR / f"run-{datetime.now():%Y%m%d-%H%M%S}"
-        self.trace = Trace(self.run_dir / "orchestrator.jsonl", "orchestrator")
+        self.trace = Trace(self.run_dir / "orchestrator.jsonl", "orchestrator", QUIET)
 
     def run(self) -> None:
         self.trace.record("task_start", text=self.directive, model=MODEL, role="orchestrator")
@@ -162,7 +163,7 @@ class Orchestrator:
         """Start each (factory, n, task, summary) agent in parallel; trace handoff and handback."""
         def run_one(factory, n, task, summary) -> tuple[str, RunResult]:
             role = f"{factory.__name__.removeprefix('make_')}-{n}"
-            agent_trace = Trace(self.run_dir / f"{role}.jsonl", role)
+            agent_trace = Trace(self.run_dir / f"{role}.jsonl", role, QUIET)
             agent: Agent = factory(self.client, agent_trace, n)
             self.trace.record("handoff", peer=agent.role, trace=str(agent_trace.path), text=summary)
             try:
