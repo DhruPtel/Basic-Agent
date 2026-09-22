@@ -1,9 +1,10 @@
 """
-sovereign-agent — Step 5: a self-correcting agent loop.
+sovereign-agent — Step 6: a self-correcting agent that knows when it's done.
 
 Takes a task, lets Claude reason with extended thinking and run Python to work
 on it, and loops until Claude answers without calling a tool. Failures are fed
-back as diagnosable information; every event lands in a JSONL trace file.
+back as diagnosable information, and the run ends when the agent verifies its
+work and declares completion. Every event lands in a JSONL trace file.
 """
 
 # --- Standard library ---
@@ -41,6 +42,9 @@ MAX_TURNS = 10
 # Give up after this many identical failures in a row.
 MAX_REPEATED_ERRORS = 3
 
+# What the agent writes on its own line to declare the task finished.
+COMPLETION_MARKER = "TASK COMPLETE"
+
 # Where JSONL trace files are written.
 TRACE_DIR = Path(__file__).parent / "traces"
 
@@ -49,7 +53,7 @@ TRACE_DIR = Path(__file__).parent / "traces"
 # SYSTEM PROMPT — the agent's standing instructions. Edit freely.
 # ==============================================================================
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT = f"""\
 You are an autonomous problem-solver. You have one tool, run_python, which
 executes Python in a fresh interpreter and returns its output.
 
@@ -72,8 +76,24 @@ How to work:
 - Verify before you conclude. Check your result against a second method, a known
   case, or an edge case, and say what you checked.
 
+- Keep working until the task is genuinely complete. Do not stop at a partial
+  result, and do not hand back a plan in place of a finished answer.
+
 - When you are confident, answer in plain language: the result itself, and how
   you got there.
+
+Finishing:
+
+- When — and only when — the task is fully done and you have verified it, end
+  your final message with this marker on a line of its own:
+
+      {COMPLETION_MARKER}
+
+- Follow the marker with two or three sentences on what you accomplished and how
+  you verified it.
+
+- Do not write the marker if anything is unfinished, unverified, or blocked. Say
+  what is still outstanding instead.
 """
 
 
@@ -95,6 +115,8 @@ class Trace:
         "tool_call": "TOOL CALL",
         "tool_result": "TOOL RESULT",
         "final_answer": "FINAL ANSWER",
+        "task_complete": "TASK COMPLETE",
+        "ended_without_marker": "ENDED — NO COMPLETION MARKER",
         "stuck": "STUCK",
         "limit_reached": "STOPPED",
         "error": "ERROR",
@@ -188,6 +210,16 @@ def error_signature(output: str) -> str:
     return lines[-1] if lines else output.strip()
 
 
+def split_completion(text: str) -> tuple[bool, str]:
+    """Look for the marker on a line of its own; return it and any summary after it."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        # Tolerate markdown decoration like **TASK COMPLETE**.
+        if line.strip().strip("*#").strip() == COMPLETION_MARKER:
+            return True, "\n".join(lines[i + 1:]).strip()
+    return False, ""
+
+
 # What Claude sees: the tool's name, when to use it, and its argument schema.
 TOOLS = [
     {
@@ -242,17 +274,26 @@ def run_agent(client: anthropic.Anthropic, task: str, trace: Trace) -> None:
                 messages=messages,
             )
         except Exception as exc:
-            trace.record("error", text=f"API request failed on turn {turn}: {exc}",
+            trace.record("error", ending="error",
+                         text=f"API request failed on turn {turn}: {exc}",
                          detail=traceback.format_exc())
             return
 
         # Show the reasoning before the actions it led to.
         record_thinking(response, trace, turn)
 
-        # No tool calls means Claude is done.
+        # No tool calls means Claude has stopped — work out how it ended.
         if response.stop_reason != "tool_use":
             text = "\n".join(b.text for b in response.content if b.type == "text")
             trace.record("final_answer", text=text, stop_reason=response.stop_reason)
+
+            declared, summary = split_completion(text)
+            if declared:
+                trace.record("task_complete", ending="complete",
+                             text=summary or "(marker given with no summary)")
+            else:
+                trace.record("ended_without_marker", ending="no_marker",
+                             text="Stopped without declaring the task complete.")
             return
 
         # Append the FULL turn — thinking blocks must be replayed verbatim
@@ -291,15 +332,16 @@ def run_agent(client: anthropic.Anthropic, task: str, trace: Trace) -> None:
 
         # Stop out rather than retry the same broken thing forever.
         if repeats >= MAX_REPEATED_ERRORS:
-            trace.record("stuck", text=f"Same failure {repeats} times in a row — "
-                                       f"stopping. Last error: {last_error}")
+            trace.record("stuck", ending="stopped_early",
+                         text=f"Same failure {repeats} times in a row — "
+                              f"stopping. Last error: {last_error}")
             return
 
         # Send all results back in one user message, then loop.
         messages.append({"role": "user", "content": tool_results})
 
     stuck_on = f" Last error: {last_error}" if last_error else ""
-    trace.record("limit_reached",
+    trace.record("limit_reached", ending="stopped_early",
                  text=f"Hit the {MAX_TURNS}-turn limit with no final answer.{stuck_on}")
 
 
@@ -324,7 +366,8 @@ def main() -> None:
     try:
         run_agent(client, task, trace)
     except Exception as exc:
-        trace.record("error", text=f"Unexpected failure: {type(exc).__name__}: {exc}",
+        trace.record("error", ending="error",
+                     text=f"Unexpected failure: {type(exc).__name__}: {exc}",
                      detail=traceback.format_exc())
     finally:
         trace.close()
