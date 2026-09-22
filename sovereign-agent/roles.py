@@ -143,9 +143,9 @@ CANDIDATES_TOOL = output_schema(
 )
 
 
-def make_hunter(client: anthropic.Anthropic, trace: Trace, n: int) -> Agent:
+def make_hunter(client: anthropic.Anthropic, trace: Trace, n: int, **opts) -> Agent:
     return Agent(client, f"hunter-{n}", HUNTER_PROMPT, RESEARCH_TOOLS, trace,
-                 output_tool=CANDIDATES_TOOL, max_turns=30)
+                 output_tool=CANDIDATES_TOOL, max_turns=30, **opts)
 
 
 # --- Verifier: confirm, canonicalise, and flag -------------------------------
@@ -198,6 +198,6 @@ VERDICTS_TOOL = output_schema(
 )
 
 
-def make_verifier(client: anthropic.Anthropic, trace: Trace, n: int) -> Agent:
+def make_verifier(client: anthropic.Anthropic, trace: Trace, n: int, **opts) -> Agent:
     return Agent(client, f"verifier-{n}", VERIFIER_PROMPT, RESEARCH_TOOLS, trace,
-                 output_tool=VERDICTS_TOOL, max_turns=30)
+                 output_tool=VERDICTS_TOOL, max_turns=30, **opts)

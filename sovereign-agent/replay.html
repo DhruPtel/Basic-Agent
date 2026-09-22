@@ -278,7 +278,7 @@ const LABELS = {
   tool_result: "Tool result", final_answer: "Final answer", task_complete: "Task complete",
   ended_without_marker: "Ended — no marker", stuck: "Stuck", limit_reached: "Turn limit",
   error: "Error", run_end: "Run end", plan: "Plan", handoff: "Handoff →", handback: "Handback ←",
-  merge: "Merge", report: "Report",
+  merge: "Merge", report: "Report", budget_stop: "Budget stop", usage: "Token usage",
 };
 const WHY = {
   task_start: "The agent receives its task as the first user message. From here it loops: think → call tools → read results.",
@@ -298,6 +298,8 @@ const WHY = {
   handback: "The agent finished; its submitted items flow back to the orchestrator.",
   merge: "Hunter lists are combined and deduplicated by normalised name.",
   report: "Only verified entries with a source make it into the saved report.",
+  budget_stop: "The run-wide token budget is reached: no new turns or agents start, and the run wraps up with what it has.",
+  usage: "Total tokens used by every agent in the run, with a rough cost estimate.",
 };
 const STATUS_TEXT = { idle: "waiting", assigned: "assigned — starting", working: "working",
   complete: "✓ complete", no_marker: "ended without completion marker", stopped: "stopped early",

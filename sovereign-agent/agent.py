@@ -36,6 +36,9 @@ COMPLETION_MARKER = "TASK COMPLETE"
 TRACE_DIR = Path(__file__).parent / "traces"
 VERBOSE = os.environ.get("VERBOSE", "") not in ("", "0")  # VERBOSE=1: full detail in quiet-by-default runs
 
+INPUT_PRICE = 3.0          # rough $ per million input tokens (Sonnet), for estimates only
+OUTPUT_PRICE = 15.0        # rough $ per million output tokens
+
 
 # --- Tracing ------------------------------------------------------------------
 
@@ -63,13 +66,16 @@ class Trace:
         "handback": "HANDBACK ←",
         "merge": "MERGE",
         "report": "REPORT",
+        "budget_stop": "BUDGET STOP",
+        "usage": "USAGE",
     }
 
     # Checked in order; the first one present is shown under the heading.
     BODY_FIELDS = ("text", "thinking", "output")
 
     # Quiet mode prints only these, one line each; the file always gets everything.
-    QUIET_EVENTS = {"plan", "handoff", "handback", "merge", "report", "tool_call", "run_end"}
+    QUIET_EVENTS = {"plan", "handoff", "handback", "merge", "report", "tool_call", "run_end",
+                    "budget_stop", "usage"}
 
     def __init__(self, path: Path, label: str = "", quiet: bool = False) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -125,6 +131,8 @@ class Trace:
                 line += ":\n" + textwrap.indent(text, "    ")
             elif text:
                 line += f": {text}"
+        if "tokens" in entry and "token_limit" in entry:  # running total at orchestrator milestones
+            line += f"\n{prefix}tokens: {short(entry['tokens'])} / {short(entry['token_limit'])}"
         with _print_lock:
             print(prefix + line, flush=True)
 
@@ -132,11 +140,45 @@ class Trace:
         self._file.close()
 
 
+# --- Token budget -------------------------------------------------------------
+
+def short(n: int) -> str:
+    """2500000 → '2.5M', 340123 → '340k'."""
+    return f"{n / 1e6:.3g}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e3 else str(n)
+
+
+class Budget:
+    """Token usage shared by every agent in a run, with a ceiling. Thread-safe."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.input = self.output = 0
+        self._lock = threading.Lock()
+
+    def add(self, usage) -> None:
+        """Count one API response; input includes cache reads/writes, output includes thinking."""
+        with self._lock:
+            self.input += (usage.input_tokens + (usage.cache_creation_input_tokens or 0)
+                           + (usage.cache_read_input_tokens or 0))
+            self.output += usage.output_tokens
+
+    @property
+    def total(self) -> int:
+        return self.input + self.output
+
+    def exceeded(self, share: float = 1.0) -> bool:
+        """At or past `share` of the ceiling (e.g. 0.8 stops hunting early, leaving room to verify)."""
+        return self.total >= self.limit * share
+
+    def cost(self) -> float:
+        return (self.input * INPUT_PRICE + self.output * OUTPUT_PRICE) / 1e6
+
+
 # --- The agent ----------------------------------------------------------------
 
 class RunResult(NamedTuple):
     """How a run ended, Claude's closing summary, and any items it submitted."""
-    ending: str        # complete | no_marker | stopped_early | error
+    ending: str        # complete | no_marker | stopped_early | error | skipped
     summary: str
     items: list[dict]
 
@@ -155,7 +197,8 @@ class Agent:
 
     def __init__(self, client: anthropic.Anthropic, role: str, system_prompt: str,
                  tools: list[Tool], trace: Trace, *, output_tool: ToolParam | None = None,
-                 max_turns: int = MAX_TURNS) -> None:
+                 max_turns: int = MAX_TURNS, budget: Budget | None = None,
+                 budget_share: float = 1.0) -> None:
         self.client = client
         self.role = role
         self.system_prompt = system_prompt
@@ -164,6 +207,8 @@ class Agent:
         self.output_tool = output_tool  # optional submit tool for structured results
         self.max_turns = max_turns
         self.items: list[dict] = []     # everything submitted through output_tool
+        self.budget = budget            # shared run-wide token counter, if any
+        self.budget_share = budget_share
 
     @property
     def schemas(self) -> list[ToolParam]:
@@ -191,6 +236,14 @@ class Agent:
         repeats = 0
 
         for turn in range(1, self.max_turns + 1):
+            # Budget is checked between turns, so a started turn always finishes.
+            if self.budget and self.budget.exceeded(self.budget_share):
+                summary = (f"Token budget reached ({short(self.budget.total)} of "
+                           f"{short(self.budget.limit)}) — stopping before turn {turn}.")
+                self.trace.record("budget_stop", ending="stopped_early", text=summary,
+                                  tokens=self.budget.total)
+                return "stopped_early", summary
+
             response = self.client.messages.create(
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
@@ -199,6 +252,8 @@ class Agent:
                 thinking={"type": "enabled", "budget_tokens": THINKING_BUDGET},
                 messages=messages,
             )
+            if self.budget:
+                self.budget.add(response.usage)
             self._record_thinking(response, turn)
 
             # No tool calls means Claude has stopped — did it declare completion?

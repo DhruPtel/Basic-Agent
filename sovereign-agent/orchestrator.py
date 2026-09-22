@@ -9,6 +9,7 @@ traces/<run>/, and the orchestrator's handoffs go to orchestrator.jsonl.
 """
 
 import json
+import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -16,7 +17,7 @@ from datetime import datetime
 
 import anthropic
 
-from agent import MODEL, TRACE_DIR, VERBOSE, Agent, RunResult, Trace, make_client
+from agent import MODEL, TRACE_DIR, VERBOSE, Agent, Budget, RunResult, Trace, make_client, short
 from roles import make_hunter, make_verifier
 from tools import write_report
 
@@ -27,6 +28,8 @@ NUM_HUNTERS = 2
 VERIFY_BATCH = 30          # candidates per verifier instance; keeps each context small
 MAX_PARALLEL = 3           # agents running at once
 QUIET = not VERBOSE        # milestones only in the terminal; traces keep full detail
+MAX_TOTAL_TOKENS = int(os.environ.get("MAX_TOTAL_TOKENS", 2_500_000))  # whole run, all agents (~$10)
+HUNT_SHARE = 0.8           # hunting stops at 80% of the budget, leaving room to verify
 
 FALLBACK_ANGLES = [
     {"label": "Lists and directories",
@@ -58,7 +61,13 @@ ANGLES_TOOL = {
 }
 
 
-def plan_angles(client: anthropic.Anthropic, directive: str, trace: Trace) -> list[dict]:
+def usage_fields(budget: Budget) -> dict:
+    """Running token total, attached to orchestrator milestones."""
+    return {"tokens": budget.total, "token_limit": budget.limit}
+
+
+def plan_angles(client: anthropic.Anthropic, directive: str, trace: Trace,
+                budget: Budget) -> list[dict]:
     """One forced tool call to split the directive into non-overlapping angles."""
     try:
         response = client.messages.create(
@@ -71,17 +80,18 @@ def plan_angles(client: anthropic.Anthropic, directive: str, trace: Trace) -> li
                 f"{NUM_HUNTERS} complementary angles with as little overlap as possible, "
                 f"so that together they cover everything that could match."}],
         )
+        budget.add(response.usage)
         block = next(b for b in response.content if b.type == "tool_use")
         angles = [a for a in block.input["angles"] if a.get("label") and a.get("strategy")]
         if len(angles) >= NUM_HUNTERS:
             angles = angles[:NUM_HUNTERS]
-            trace.record("plan", angles=angles, text=_format_angles(angles))
+            trace.record("plan", angles=angles, text=_format_angles(angles), **usage_fields(budget))
             return angles
         reason = f"got {len(angles)} usable angles"
     except Exception as exc:
         reason = f"{type(exc).__name__}: {exc}"
 
-    trace.record("plan", angles=FALLBACK_ANGLES, fallback=True,
+    trace.record("plan", angles=FALLBACK_ANGLES, fallback=True, **usage_fields(budget),
                  text=f"Planning failed ({reason}); using fallback angles.\n"
                       + _format_angles(FALLBACK_ANGLES))
     return FALLBACK_ANGLES
@@ -128,11 +138,12 @@ class Orchestrator:
         self.directive = directive
         self.run_dir = TRACE_DIR / f"run-{datetime.now():%Y%m%d-%H%M%S}"
         self.trace = Trace(self.run_dir / "orchestrator.jsonl", "orchestrator", QUIET)
+        self.budget = Budget(MAX_TOTAL_TOKENS)  # shared by every agent in this run
 
     def run(self) -> None:
         self.trace.record("task_start", text=self.directive, model=MODEL, role="orchestrator")
 
-        angles = plan_angles(self.client, self.directive, self.trace)
+        angles = plan_angles(self.client, self.directive, self.trace, self.budget)
         hunts = self._run_agents([
             (make_hunter, n, self._hunter_task(angle), angle["label"])
             for n, angle in enumerate(angles, 1)
@@ -140,7 +151,7 @@ class Orchestrator:
 
         candidates = merge({role: result.items for role, result in hunts.items()})
         total = sum(len(r.items) for r in hunts.values())
-        self.trace.record("merge", candidates=len(candidates),
+        self._record("merge", candidates=len(candidates),
                           text=f"{total} raw candidates from {len(hunts)} hunters → "
                                f"{len(candidates)} after dedup by name.")
 
@@ -155,7 +166,12 @@ class Orchestrator:
             for n, batch in enumerate(batches, 1)
         ])
 
-        self._save_report(angles, hunts, candidates, verdicts)
+        # Always report, even when the budget cut hunting or verification short.
+        self._save_report(angles, hunts, candidates, batches, verdicts)
+        b = self.budget
+        self.trace.record("usage", input_tokens=b.input, output_tokens=b.output, cost_usd=round(b.cost(), 2),
+                     text=f"{b.total:,} tokens ({short(b.input)} in / {short(b.output)} out) "
+                          f"· est. ${b.cost():.2f}" + (" · budget reached" if b.exceeded() else ""))
         self.trace.close()
         print(f"Traces saved to {self.run_dir}/")
 
@@ -163,14 +179,19 @@ class Orchestrator:
         """Start each (factory, n, task, summary) agent in parallel; trace handoff and handback."""
         def run_one(factory, n, task, summary) -> tuple[str, RunResult]:
             role = f"{factory.__name__.removeprefix('make_')}-{n}"
+            share = HUNT_SHARE if role.startswith("hunter") else 1.0
+            if self.budget.exceeded(share):  # don't launch new work past the budget
+                self._record("budget_stop", peer=role, text=f"Token budget reached — not launching {role}.")
+                return role, RunResult("skipped", "token budget reached", [])
+
             agent_trace = Trace(self.run_dir / f"{role}.jsonl", role, QUIET)
-            agent: Agent = factory(self.client, agent_trace, n)
-            self.trace.record("handoff", peer=agent.role, trace=str(agent_trace.path), text=summary)
+            agent: Agent = factory(self.client, agent_trace, n, budget=self.budget, budget_share=share)
+            self._record("handoff", peer=agent.role, trace=str(agent_trace.path), text=summary)
             try:
                 result = agent.run(task)
             finally:
                 agent_trace.close()
-            self.trace.record("handback", peer=agent.role, ending=result.ending,
+            self._record("handback", peer=agent.role, ending=result.ending,
                               items=len(result.items),
                               text=f"{result.ending} — {len(result.items)} items returned.")
             return agent.role, result
@@ -179,6 +200,10 @@ class Orchestrator:
             return {}
         with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
             return dict(pool.map(lambda job: run_one(*job), jobs))
+
+    def _record(self, event: str, **data) -> None:
+        """Trace an orchestrator event along with the run's token total so far."""
+        self.trace.record(event, **data, **usage_fields(self.budget))
 
     def _hunter_task(self, angle: dict) -> str:
         return (f"Directive: {self.directive}\n\n"
@@ -193,7 +218,7 @@ class Orchestrator:
                 + json.dumps([{k: c[k] for k in ("name", "source_urls", "notes")} for c in batch],
                              indent=1))
 
-    def _save_report(self, angles, hunts, candidates, verdicts) -> None:
+    def _save_report(self, angles, hunts, candidates, batches, verdicts) -> None:
         """Write the final sourced list via write_report."""
         verified: dict[str, dict] = {}
         excluded: list[dict] = []
@@ -206,6 +231,15 @@ class Orchestrator:
                     excluded.append(v)
         entries = sorted(verified.values(), key=lambda v: str(v.get("name", "")).lower())
 
+        # Candidates a verifier never reached (skipped, or stopped by budget/turn limit).
+        unverified = []
+        for n, batch in enumerate(batches, 1):
+            r = verdicts.get(f"verifier-{n}")
+            if r and r.ending == "complete":
+                continue
+            judged = {name_key(str(v.get("name", ""))) for v in (r.items if r else [])}
+            unverified += [c for c in batch if name_key(c["name"]) not in judged]
+
         lines = [
             f"# {self.directive}", "",
             f"_{len(entries)} verified entries from {len(candidates)} candidates · "
@@ -214,6 +248,10 @@ class Orchestrator:
         ]
         lines += [f"{i}. **{v['name']}**" + (f" — {v['note']}" if v.get("note") else "")
                   + f" ([source]({v['source_url']}))" for i, v in enumerate(entries, 1)]
+        if unverified:
+            lines += ["", "## Unverified — no verdict (budget or turn limit reached)", ""]
+            lines += [f"- {c['name']}" + (f" ([hunter source]({c['source_urls'][0]}))" if c["source_urls"] else "")
+                      for c in unverified]
         if excluded:
             lines += ["", "## Excluded", ""]
             lines += [f"- {v.get('name', '?')} — {v.get('status', '?')}: {v.get('note', '')}"
@@ -223,11 +261,13 @@ class Orchestrator:
                   for (role, r), angle in zip(hunts.items(), angles)]
         lines += [f"- **{role}**: {len(r.items)} verdicts, ended *{r.ending}*"
                   for role, r in verdicts.items()]
-        lines.append("- Step 1 scaffold: single hunting round, no saturation loop yet.")
+        lines.append(f"- Tokens: {short(self.budget.total)} of {short(self.budget.limit)} budget "
+                     f"(est. ${self.budget.cost():.2f})" + (" — budget reached" if self.budget.exceeded() else ""))
+        lines.append("- Single hunting round; no saturation loop yet.")
 
         result = write_report(f"enumeration {self.directive}", "\n".join(lines) + "\n")
-        self.trace.record("report", status="ok" if result.ok else "error", entries=len(entries),
-                          excluded=len(excluded), text=result.output)
+        self._record("report", status="ok" if result.ok else "error", entries=len(entries),
+                     excluded=len(excluded), unverified=len(unverified), text=result.output)
 
 
 def main() -> None:
