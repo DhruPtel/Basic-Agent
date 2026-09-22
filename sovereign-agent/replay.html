@@ -1,0 +1,756 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Run Replay</title>
+<style>
+:root {
+  --bg: #f6f6f3; --surface: #ffffff; --surface-2: #efefeb; --ink: #1c1c1e; --muted: #67676e;
+  --line: #d6d6db; --line-strong: #a9a9b1;
+  --orch: #5b5bd6; --orch-tint: #ececfb;
+  --hunt: #0d8a7b; --hunt-tint: #e1f3f0;
+  --ver: #b45f06; --ver-tint: #fbeedd;
+  --ok: #1a7f37; --err: #c9302c; --warn: #9a6700;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #151517; --surface: #1e1e21; --surface-2: #28282c; --ink: #ececef; --muted: #9d9da6;
+    --line: #38383e; --line-strong: #5c5c64;
+    --orch: #9b9bf5; --orch-tint: #26264a;
+    --hunt: #3cc7b4; --hunt-tint: #16332f;
+    --ver: #f0a24a; --ver-tint: #3a2a16;
+    --ok: #4ac26b; --err: #ff6b62; --warn: #e3b341;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.45 var(--sans); display: flex; flex-direction: column; }
+button, select, input { font: inherit; color: inherit; }
+.muted { color: var(--muted); }
+
+/* --- Top bar --- */
+.topbar { display: flex; align-items: center; gap: 16px; padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--surface); flex-wrap: wrap; }
+.topbar h1 { font-size: 17px; margin: 0; }
+.topbar .title { flex: 1; min-width: 200px; }
+.topbar .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); cursor: pointer; white-space: nowrap; }
+.btn:hover { background: var(--surface-2); }
+.btn.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.btn:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--orch); outline-offset: 2px; }
+.directive { padding: 10px 20px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.directive b { font-weight: 600; }
+
+/* --- Layout --- */
+.layout { flex: 1; display: flex; min-height: 0; }
+main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-y: auto; padding: 16px 20px 20px; gap: 14px; }
+
+/* --- Stage strip --- */
+.stages { display: flex; gap: 6px; list-style: none; padding: 0; margin: 0; flex-wrap: wrap; }
+.stages li { flex: 1; min-width: 90px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); font-size: 13px; }
+.stages li b { display: block; color: var(--ink); font-size: 13px; }
+.stages li.done { border-color: var(--line-strong); }
+.stages li.done b::after { content: " ✓"; color: var(--ok); }
+.stages li.current { border-color: var(--orch); background: var(--orch-tint); }
+.stages li.pending b { color: var(--muted); }
+
+/* --- Diagram --- */
+.diagram-wrap { position: relative; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 16px 24px; }
+#edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+#diagram { position: relative; display: flex; flex-direction: column; align-items: center; gap: 72px; }
+.row-bottom { display: flex; gap: 28px; justify-content: center; flex-wrap: wrap; width: 100%; }
+.group { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.group-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; background: var(--surface); padding: 0 8px; position: relative; }
+.group .nodes { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+
+.node { width: 232px; background: var(--surface); border: 1.5px solid var(--line); border-radius: 12px; padding: 10px 12px; cursor: pointer; transition: box-shadow .2s, border-color .2s, opacity .2s, transform .2s; position: relative; }
+.node:hover { border-color: var(--line-strong); }
+.node .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.node .name { font-weight: 650; font-size: 15px; }
+.node .kind { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; padding: 1px 6px; border-radius: 4px; }
+.node .assign { font-size: 12px; color: var(--muted); margin-top: 2px; min-height: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node .status { font-size: 12px; margin-top: 6px; display: flex; align-items: center; gap: 6px; }
+.node .status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong); flex: none; }
+.node .activity { font: 12px/1.4 var(--mono); margin-top: 6px; padding: 6px 8px; background: var(--surface-2); border-radius: 6px; min-height: 46px; }
+.node .activity span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+.node .stats { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.node.orch { width: 300px; }
+
+.kind-orch { --k: var(--orch); --kt: var(--orch-tint); }
+.kind-hunt { --k: var(--hunt); --kt: var(--hunt-tint); }
+.kind-ver  { --k: var(--ver);  --kt: var(--ver-tint); }
+.node .kind { color: var(--k); background: var(--kt); }
+.node { border-top: 4px solid var(--k); }
+
+.node.s-idle { opacity: .5; }
+.node.s-working .status .dot { background: var(--k); animation: pulse 1.2s infinite; }
+.node.s-complete .status .dot { background: var(--ok); }
+.node.s-stopped .status .dot, .node.s-no_marker .status .dot { background: var(--warn); }
+.node.s-error .status .dot { background: var(--err); }
+.node.active { border-color: var(--k); box-shadow: 0 0 0 4px var(--kt), 0 6px 18px rgba(0,0,0,.12); transform: translateY(-2px); opacity: 1; }
+.node.active .activity { background: var(--kt); }
+.node.peer { border-color: var(--k); box-shadow: 0 0 0 3px var(--kt); opacity: 1; }
+.node.filtered { outline: 2px dashed var(--k); outline-offset: 4px; }
+@keyframes pulse { 50% { opacity: .35; } }
+
+.edge { stroke: var(--line-strong); stroke-width: 1.5; stroke-dasharray: 5 5; fill: none; transition: stroke .2s, stroke-width .2s; }
+.edge.live { stroke: var(--k); stroke-dasharray: none; opacity: .55; }
+.edge.done { stroke: var(--line-strong); stroke-dasharray: none; }
+.edge.flash { stroke: var(--k); stroke-width: 3.5; stroke-dasharray: none; opacity: 1; }
+.edge-label { font: 600 12px var(--sans); fill: var(--k); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; }
+
+/* --- Narration --- */
+.narration { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; min-height: 72px; }
+.narration .what { font-size: 15px; font-weight: 550; word-break: break-word; }
+.narration .why { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+/* --- Controls --- */
+.controls { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
+.controls .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.controls .spacer { flex: 1; }
+.controls .readout { font: 13px var(--mono); color: var(--muted); }
+.track { position: relative; padding-top: 14px; }
+.track input[type=range] { width: 100%; margin: 0; accent-color: var(--orch); }
+.tick { position: absolute; top: 0; width: 3px; height: 12px; margin-left: -1px; border-radius: 2px; background: var(--k); cursor: pointer; }
+.tick.milestone { height: 14px; width: 4px; background: var(--ink); }
+label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+select { padding: 5px 8px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--surface); }
+
+.legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+/* --- Side panel --- */
+.panel { width: 440px; flex: none; border-left: 1px solid var(--line); background: var(--surface); display: flex; flex-direction: column; min-height: 0; }
+.panel[hidden] { display: none; }
+.panel-head { padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.panel-head h2 { font-size: 14px; margin: 0; }
+.panel-head .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+#log { list-style: none; margin: 0; padding: 6px 0; overflow-y: auto; flex: 1; }
+.entry { padding: 7px 14px; border-left: 3px solid transparent; border-bottom: 1px solid var(--surface-2); }
+.entry.current { background: var(--kt); border-left-color: var(--k); }
+.entry .meta { display: flex; gap: 8px; align-items: baseline; font-size: 12px; flex-wrap: wrap; }
+.entry .t { font-family: var(--mono); color: var(--muted); }
+.entry .who { font-weight: 650; color: var(--k); }
+.entry .ev { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.entry .ev.err { color: var(--err); font-weight: 650; }
+.entry .one { font: 12.5px/1.4 var(--mono); margin-top: 2px; word-break: break-word; }
+.entry .preview { font: 12px/1.45 var(--mono); color: var(--muted); margin-top: 3px; white-space: pre-wrap; word-break: break-word; }
+.entry details { margin-top: 4px; font-size: 12px; }
+.entry summary { cursor: pointer; color: var(--orch); }
+.entry pre { font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; background: var(--surface-2); padding: 8px; border-radius: 6px; max-height: 420px; overflow: auto; margin: 6px 0 0; }
+
+/* --- Empty state --- */
+.empty { max-width: 640px; margin: 40px auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 24px 28px; }
+.empty h2 { margin-top: 0; font-size: 18px; }
+.empty code { font-family: var(--mono); background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+
+@media (max-width: 900px) {
+  .layout { flex-direction: column; }
+  .panel { width: 100%; border-left: none; border-top: 1px solid var(--line); max-height: 60vh; }
+  main { overflow: visible; padding: 12px 16px; }
+  .node, .node.orch { width: min(100%, 280px); }
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="title">
+    <h1>Agent run replay</h1>
+    <div id="runName" class="muted">No run loaded</div>
+  </div>
+  <div class="actions">
+    <label class="btn" title="Pick a traces/run-&lt;stamp&gt; folder">Open run folder…
+      <input type="file" id="dirInput" webkitdirectory hidden></label>
+    <label class="btn" title="Or select the .jsonl files inside a run folder">Open .jsonl files…
+      <input type="file" id="filesInput" multiple accept=".jsonl" hidden></label>
+    <button class="btn" id="panelToggle" aria-expanded="true">Hide trace log</button>
+  </div>
+</header>
+<div class="directive" id="directive" hidden></div>
+
+<div class="layout">
+  <main>
+    <div id="empty" class="empty">
+      <h2>Load a run to replay it</h2>
+      <p>Each orchestrator run writes a folder of traces: <code>traces/run-&lt;stamp&gt;/</code> containing
+        <code>orchestrator.jsonl</code>, <code>hunter-N.jsonl</code> and <code>verifier-N.jsonl</code>.</p>
+      <p><b>Easiest:</b> from <code>sovereign-agent/</code>, run <code>python replay.py</code> (latest run) or
+        <code>python replay.py traces/run-&lt;stamp&gt;</code>. It builds a replay page with the run built in and opens it.</p>
+      <p><b>Or:</b> click <b>Open run folder…</b> above and choose a run folder.</p>
+    </div>
+
+    <div id="viewer" hidden>
+      <ol class="stages" id="stages" aria-label="Run stages">
+        <li data-stage="0"><b>1 · Plan</b>Orchestrator splits the directive into angles</li>
+        <li data-stage="1"><b>2 · Hunt</b>Hunters search in parallel</li>
+        <li data-stage="2"><b>3 · Merge</b>Candidates combined and deduplicated</li>
+        <li data-stage="3"><b>4 · Verify</b>Verifiers check each candidate</li>
+        <li data-stage="4"><b>5 · Report</b>Final sourced list saved</li>
+      </ol>
+
+      <section class="diagram-wrap" id="wrap" aria-label="Agent diagram">
+        <svg id="edges" aria-hidden="true">
+          <defs>
+            <marker id="arrow-hunt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill: var(--hunt)"/></marker>
+            <marker id="arrow-ver" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill: var(--ver)"/></marker>
+          </defs>
+        </svg>
+        <div id="diagram">
+          <div id="rowTop"></div>
+          <div class="row-bottom">
+            <div class="group" id="groupHunt"><div class="group-label">Hunters · find candidates</div><div class="nodes"></div></div>
+            <div class="group" id="groupVer"><div class="group-label">Verifiers · check candidates</div><div class="nodes"></div></div>
+          </div>
+        </div>
+      </section>
+
+      <div class="narration" aria-live="polite">
+        <div class="what" id="what"></div>
+        <div class="why" id="why"></div>
+      </div>
+
+      <section class="controls" aria-label="Playback">
+        <div class="row">
+          <button class="btn" id="startBtn" title="Jump to start (Home)">⏮</button>
+          <button class="btn" id="backBtn" title="Previous event (←)">◀ Step</button>
+          <button class="btn primary" id="playBtn" title="Play / pause (Space)">▶ Play</button>
+          <button class="btn" id="fwdBtn" title="Next event (→)">Step ▶</button>
+          <button class="btn" id="endBtn" title="Jump to end (End)">⏭</button>
+          <label class="inline">Speed
+            <select id="speed">
+              <option value="1">1 event/s</option>
+              <option value="2">2 events/s</option>
+              <option value="4" selected>4 events/s</option>
+              <option value="8">8 events/s</option>
+              <option value="16">16 events/s</option>
+              <option value="40">40 events/s</option>
+            </select>
+          </label>
+          <span class="spacer"></span>
+          <span class="readout" id="readout"></span>
+        </div>
+        <div class="track">
+          <div id="ticks"></div>
+          <input type="range" id="scrub" min="0" max="0" value="0" aria-label="Timeline">
+        </div>
+        <div class="legend">
+          <span>Marks above the timeline:</span>
+          <span><i style="background: var(--ink)"></i>Plan / Merge / Report</span>
+          <span><i style="background: var(--hunt)"></i>Hunter handoff/handback</span>
+          <span><i style="background: var(--ver)"></i>Verifier handoff/handback</span>
+          <span>· Click a node to filter the trace log to that agent.</span>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <aside class="panel" id="panel" aria-label="Trace log">
+    <div class="panel-head">
+      <h2>Trace log</h2>
+      <div class="row">
+        <label class="inline">Show
+          <select id="filter"><option value="">All agents</option></select>
+        </label>
+        <label class="inline"><input type="checkbox" id="follow" checked> Follow playback</label>
+      </div>
+    </div>
+    <ol id="log"></ol>
+  </aside>
+</div>
+
+<script>
+// Filled in by replay.py; null when the page is opened directly.
+const EMBEDDED = /*TRACE_DATA*/null;
+
+const $ = (id) => document.getElementById(id);
+const SVG = "http://www.w3.org/2000/svg";
+const MILESTONES = new Set(["plan", "handoff", "handback", "merge", "report"]);
+const ENDINGS = { task_complete: "complete", ended_without_marker: "no_marker",
+                  stuck: "stopped", limit_reached: "stopped", error: "error" };
+const LABELS = {
+  task_start: "Task", thinking: "Thinking", assistant_message: "Says", tool_call: "Tool call",
+  tool_result: "Tool result", final_answer: "Final answer", task_complete: "Task complete",
+  ended_without_marker: "Ended — no marker", stuck: "Stuck", limit_reached: "Turn limit",
+  error: "Error", run_end: "Run end", plan: "Plan", handoff: "Handoff →", handback: "Handback ←",
+  merge: "Merge", report: "Report",
+};
+const WHY = {
+  task_start: "The agent receives its task as the first user message. From here it loops: think → call tools → read results.",
+  thinking: "Extended thinking: the model reasons privately before choosing its next action.",
+  assistant_message: "Text the model wrote alongside its tool calls — often its plan for this turn.",
+  tool_call: "The model asked for a tool. The harness runs it and sends the result back as the next message.",
+  tool_result: "The tool's output goes back to the model. Errors are flagged so it can diagnose and adjust.",
+  final_answer: "The model replied without calling a tool, so the loop ends here.",
+  task_complete: "The agent printed the completion marker: it says its work is done.",
+  ended_without_marker: "The agent stopped without claiming completion.",
+  stuck: "The same error repeated three times in a row, so the guard stopped the agent.",
+  limit_reached: "The agent used all its turns. Anything it submitted still counts.",
+  error: "An unexpected exception. It was recorded rather than crashing the run.",
+  run_end: "Summary of how this agent's run ended and how many items it handed back.",
+  plan: "One Claude call splits the directive into non-overlapping search angles, one per hunter.",
+  handoff: "The orchestrator starts a fresh agent with its own prompt, tools and trace file.",
+  handback: "The agent finished; its submitted items flow back to the orchestrator.",
+  merge: "Hunter lists are combined and deduplicated by normalised name.",
+  report: "Only verified entries with a source make it into the saved report.",
+};
+const STATUS_TEXT = { idle: "waiting", assigned: "assigned — starting", working: "working",
+  complete: "✓ complete", no_marker: "ended without completion marker", stopped: "stopped early",
+  error: "error" };
+
+let events = [], agents = [], nodes = {}, edges = {}, entries = [];
+let cur = 0, playing = false, timer = null, filter = "";
+
+// --- Loading -------------------------------------------------------------------
+
+function parseRun(name, files) {
+  const list = [];
+  files.forEach((f, fileIdx) => {
+    const stem = f.name.replace(/\.jsonl$/, "");
+    f.text.split("\n").forEach((line, lineIdx) => {
+      if (!line.trim()) return;
+      try {
+        const e = JSON.parse(line);
+        e.agent = e.agent || stem;
+        e._t = Date.parse(e.ts);
+        e._order = fileIdx * 1e6 + lineIdx;
+        list.push(e);
+      } catch { /* skip malformed lines */ }
+    });
+  });
+  // Time order; within a tie keep the orchestrator first, then file line order.
+  list.sort((a, b) => a._t - b._t || rank(a.agent) - rank(b.agent) || a._order - b._order);
+  if (!list.length) { alert("No trace events found in those files."); return; }
+  load(name, list);
+}
+
+function rank(name) { return name === "orchestrator" ? 0 : 1; }
+
+async function readFiles(fileList) {
+  const files = [...fileList].filter((f) => f.name.endsWith(".jsonl"));
+  if (!files.length) { alert("No .jsonl files found. Pick a traces/run-<stamp> folder."); return; }
+  files.sort((a, b) => a.name.localeCompare(b.name));
+  const texts = await Promise.all(files.map(async (f) => ({ name: f.name, text: await f.text() })));
+  const folder = (files[0].webkitRelativePath || "").split("/")[0] || "selected files";
+  parseRun(folder, texts);
+}
+
+$("dirInput").addEventListener("change", (e) => readFiles(e.target.files));
+$("filesInput").addEventListener("change", (e) => readFiles(e.target.files));
+
+// --- Setup ---------------------------------------------------------------------
+
+function kindOf(name) {
+  if (name.startsWith("orchestrator")) return "orch";
+  if (name.startsWith("verifier")) return "ver";
+  return "hunt";
+}
+
+function load(name, list) {
+  pause();
+  events = list;
+  const names = [...new Set(events.map((e) => e.agent))];
+  const num = (n) => parseInt(n.split("-").pop(), 10) || 0;
+  agents = names.sort((a, b) => kindOrder(a) - kindOrder(b) || num(a) - num(b));
+
+  $("runName").textContent = `${name} · ${events.length} events · ${agents.length} agents`;
+  const start = events.find((e) => e.agent === "orchestrator" && e.event === "task_start");
+  $("directive").hidden = !start;
+  if (start) $("directive").innerHTML = `<b>Directive:</b> ${escapeHtml(start.text || "")}`;
+  $("empty").hidden = true;
+  $("viewer").hidden = false;
+
+  buildNodes();
+  buildLog();
+  buildTicks();
+  $("filter").innerHTML = `<option value="">All agents</option>` +
+    agents.map((a) => `<option value="${a}">${a}</option>`).join("");
+  filter = "";
+  $("scrub").max = events.length - 1;
+  requestAnimationFrame(() => { layoutEdges(); goTo(0, false); });
+}
+
+function kindOrder(name) { return { orch: 0, hunt: 1, ver: 2 }[kindOf(name)]; }
+
+function buildNodes() {
+  $("rowTop").innerHTML = "";
+  document.querySelectorAll(".group .nodes").forEach((g) => (g.innerHTML = ""));
+  nodes = {};
+  for (const name of agents) {
+    const kind = kindOf(name);
+    const el = document.createElement("div");
+    el.className = `node kind-${kind}` + (kind === "orch" ? " orch" : "");
+    el.tabIndex = 0;
+    el.setAttribute("role", "button");
+    el.setAttribute("aria-label", `${name}: filter the trace log`);
+    el.innerHTML = `
+      <div class="head"><span class="name"></span><span class="kind"></span></div>
+      <div class="assign"></div>
+      <div class="status"><span class="dot"></span><span class="stext"></span></div>
+      <div class="activity"><span></span></div>
+      <div class="stats"></div>`;
+    el.querySelector(".name").textContent = name;
+    el.querySelector(".kind").textContent = { orch: "Orchestrator", hunt: "Hunter", ver: "Verifier" }[kind];
+    const toggle = () => setFilter(filter === name ? "" : name);
+    el.addEventListener("click", toggle);
+    el.addEventListener("keydown", (e) => { if (e.key === "Enter") toggle(); });
+    const parent = kind === "orch" ? $("rowTop") : $(kind === "ver" ? "groupVer" : "groupHunt").querySelector(".nodes");
+    parent.appendChild(el);
+    nodes[name] = el;
+  }
+  $("groupVer").hidden = !agents.some((a) => kindOf(a) === "ver");
+  $("groupHunt").hidden = !agents.some((a) => kindOf(a) === "hunt");
+}
+
+// Lines from the orchestrator's bottom edge to each worker's top edge.
+function layoutEdges() {
+  const svg = $("edges");
+  svg.querySelectorAll(".edge, .edge-label").forEach((n) => n.remove());
+  edges = {};
+  const orch = nodes.orchestrator;
+  if (!orch) return;
+  const base = $("wrap").getBoundingClientRect();
+  const o = orch.getBoundingClientRect();
+  for (const name of agents) {
+    if (name === "orchestrator") continue;
+    const r = nodes[name].getBoundingClientRect();
+    const x1 = o.left + o.width / 2 - base.left, y1 = o.bottom - base.top;
+    const x2 = r.left + r.width / 2 - base.left, y2 = r.top - base.top - 2;
+    const line = document.createElementNS(SVG, "line");
+    Object.entries({ x1, y1, x2, y2 }).forEach(([k, v]) => line.setAttribute(k, v));
+    line.setAttribute("class", `edge kind-${kindOf(name)}`);
+    const label = document.createElementNS(SVG, "text");
+    label.setAttribute("class", `edge-label kind-${kindOf(name)}`);
+    label.setAttribute("x", (x1 + x2) / 2 + 8);
+    label.setAttribute("y", (y1 + y2) / 2);
+    svg.append(line, label);
+    edges[name] = { line, label, x1, y1, x2, y2 };
+  }
+  if (events.length) render(false);
+}
+
+new ResizeObserver(() => events.length && layoutEdges()).observe($("wrap"));
+
+// --- Event text helpers --------------------------------------------------------
+
+function brief(e) {
+  const a = e.args || {};
+  if (Array.isArray(a.items)) return `${a.items.length} items`;
+  const v = a.query ?? a.url ?? a.title ?? a.code ?? Object.values(a)[0] ?? "";
+  const s = String(v).replace(/\s+/g, " ").trim();
+  return `'${s.length > 70 ? s.slice(0, 70) + "…" : s}'`;
+}
+
+function firstLine(s, n = 110) {
+  const t = String(s || "").replace(/\s+/g, " ").trim();
+  return t.length > n ? t.slice(0, n) + "…" : t;
+}
+
+function toolName(e) { return e.tool === "submit_candidates" || e.tool === "submit_verdicts" ? "submit" : e.tool; }
+
+function oneLine(e) {
+  switch (e.event) {
+    case "tool_call": return `${e.tool}: ${brief(e)}`;
+    case "tool_result": return `${e.tool} → ${e.status === "error" ? "error: " : ""}${firstLine(e.output, 90)}`;
+    case "thinking": return firstLine(e.thinking);
+    case "handoff": return `→ ${e.peer}: ${firstLine(e.text, 80)}`;
+    case "handback": return `← ${e.peer}: ${firstLine(e.text, 80)}`;
+    case "plan": return `${(e.angles || []).length} search angles`;
+    default: return firstLine(e.text);
+  }
+}
+
+function fullBody(e) {
+  if (e.event === "thinking") return e.thinking || "";
+  if (e.event === "tool_call") return e.tool === "run_python" ? (e.args?.code ?? "") : JSON.stringify(e.args ?? {}, null, 2);
+  if (e.event === "tool_result") return e.output || "";
+  if (e.event === "error") return (e.text || "") + (e.detail ? "\n\n" + e.detail : "");
+  return e.text || "";
+}
+
+function narrate(e) {
+  const who = e.agent;
+  switch (e.event) {
+    case "task_start": return who === "orchestrator" ? "The orchestrator receives the directive." : `${who} starts its task.`;
+    case "thinking": return `${who} thinks before acting (turn ${e.turn}).`;
+    case "assistant_message": return `${who}: “${firstLine(e.text, 140)}”`;
+    case "tool_call": return `${who} calls ${e.tool}: ${brief(e)}${e.after_error ? " — retrying after an error" : ""}`;
+    case "tool_result": return `${e.tool} ${e.status === "error" ? "failed" : "returned"} for ${who}: ${firstLine(e.output, 110)}`;
+    case "final_answer": return `${who} writes its final answer.`;
+    case "run_end": return `${who} finished: ${e.text}.`;
+    case "plan": return `The orchestrator plans ${(e.angles || []).length} search angles: ${(e.angles || []).map((a) => a.label).join(" · ")}`;
+    case "handoff": return `The orchestrator hands work to ${e.peer}: ${firstLine(e.text, 100)}`;
+    case "handback": return `${e.peer} hands its results back: ${e.text}`;
+    case "merge": return `Merge: ${e.text}`;
+    case "report": return `Report: ${firstLine(e.text, 160)}`;
+    default: return `${who}: ${LABELS[e.event] || e.event} — ${firstLine(e.text, 120)}`;
+  }
+}
+
+function elapsed(e) {
+  const s = Math.max(0, Math.round((e._t - events[0]._t) / 1000));
+  return `+${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+// --- Trace log -----------------------------------------------------------------
+
+function buildLog() {
+  const log = $("log");
+  log.innerHTML = "";
+  entries = events.map((e, i) => {
+    const li = document.createElement("li");
+    li.className = `entry kind-${kindOf(e.agent)}`;
+    li.hidden = true;
+    const isErr = e.status === "error" || e.event === "error";
+    li.innerHTML = `<div class="meta"><span class="t"></span><span class="who"></span><span class="ev${isErr ? " err" : ""}"></span></div><div class="one"></div>`;
+    li.querySelector(".t").textContent = elapsed(e);
+    li.querySelector(".who").textContent = e.agent;
+    li.querySelector(".ev").textContent = e.event === "tool_result" && isErr ? "Tool error" : (LABELS[e.event] || e.event);
+    li.querySelector(".one").textContent = oneLine(e);
+
+    const body = fullBody(e);
+    // Preview only when it adds something beyond the one-line summary above.
+    const adds = body.replace(/\s+/g, " ").trim().length > 110 ||
+      (e.event === "tool_call" && !["web_search", "fetch_url"].includes(e.tool));
+    if (body && adds && ["thinking", "tool_result", "assistant_message", "final_answer", "task_start", "plan", "error", "tool_call"].includes(e.event)) {
+      const pv = document.createElement("div");
+      pv.className = "preview";
+      pv.textContent = body.length > 260 ? body.slice(0, 260) + "…" : body;
+      li.appendChild(pv);
+      if (body.length > 260) {
+        const d = document.createElement("details");
+        d.innerHTML = `<summary>Show full (${body.length.toLocaleString()} chars)</summary><pre></pre>`;
+        d.addEventListener("toggle", () => { const pre = d.querySelector("pre"); if (!pre.textContent) pre.textContent = body; });
+        li.appendChild(d);
+      }
+    }
+    li.addEventListener("click", (ev) => { if (ev.target.tagName !== "SUMMARY" && !ev.target.closest("pre")) { pause(); goTo(i, false); } });
+    log.appendChild(li);
+    return li;
+  });
+}
+
+function visible(i) {
+  const e = events[i];
+  return i <= cur && (!filter || e.agent === filter || e.peer === filter);
+}
+
+function updateLog(prev) {
+  const [lo, hi] = prev < 0 ? [0, events.length - 1] : [Math.min(prev, cur), Math.max(prev, cur)];
+  for (let i = lo; i <= hi; i++) entries[i].hidden = !visible(i);
+  entries.forEach((li) => li.classList.remove("current"));
+  const li = entries[cur];
+  li.classList.add("current");
+  if ($("follow").checked && !li.hidden && !$("panel").hidden) li.scrollIntoView({ block: "nearest" });
+}
+
+function setFilter(name) {
+  filter = name;
+  $("filter").value = name;
+  Object.entries(nodes).forEach(([n, el]) => el.classList.toggle("filtered", n === name));
+  if ($("panel").hidden) togglePanel();
+  updateLog(-1);
+}
+
+$("filter").addEventListener("change", (e) => setFilter(e.target.value));
+$("follow").addEventListener("change", () => updateLog(cur));
+
+function togglePanel() {
+  const p = $("panel");
+  p.hidden = !p.hidden;
+  $("panelToggle").textContent = p.hidden ? "Show trace log" : "Hide trace log";
+  $("panelToggle").setAttribute("aria-expanded", String(!p.hidden));
+}
+$("panelToggle").addEventListener("click", togglePanel);
+
+// --- Timeline ticks ------------------------------------------------------------
+
+function buildTicks() {
+  const box = $("ticks");
+  box.innerHTML = "";
+  const n = Math.max(1, events.length - 1);
+  events.forEach((e, i) => {
+    if (!MILESTONES.has(e.event)) return;
+    const t = document.createElement("div");
+    const peerKind = e.peer ? kindOf(e.peer) : "orch";
+    t.className = `tick kind-${peerKind}` + (e.peer ? "" : " milestone");
+    t.style.left = `${(i / n) * 100}%`;
+    t.title = `${elapsed(e)} ${LABELS[e.event]}${e.peer ? " " + e.peer : ""}`;
+    t.addEventListener("click", () => { pause(); goTo(i, false); });
+    box.appendChild(t);
+  });
+}
+
+// --- State: replay events 0..cur into each agent's current condition -----------
+
+function computeState(upTo) {
+  const st = {};
+  agents.forEach((a) => (st[a] = { status: "idle", turn: 0, calls: 0, items: 0, activity: "", assign: "", handoffs: 0, handbacks: 0 }));
+  let stage = -1;
+  for (let i = 0; i <= upTo; i++) {
+    const e = events[i], s = st[e.agent];
+    switch (e.event) {
+      case "task_start":
+        s.status = "working";
+        s.activity = e.agent === "orchestrator" ? "received the directive" : "reading its task";
+        break;
+      case "thinking": s.turn = +e.turn || s.turn; s.activity = "thinking…"; break;
+      case "assistant_message": s.turn = +e.turn || s.turn; s.activity = `“${firstLine(e.text, 80)}”`; break;
+      case "tool_call":
+        s.turn = +e.turn || s.turn; s.calls++;
+        if (Array.isArray(e.args?.items)) s.items += e.args.items.length;
+        s.activity = `${toolName(e)}: ${brief(e)}`;
+        break;
+      case "tool_result": s.activity = `${toolName(e)}: ${e.status === "error" ? "✗ error" : "✓ result received"}`; break;
+      case "final_answer": s.activity = "writing its final answer"; break;
+      case "run_end": s.status = e.ending === "stopped_early" ? "stopped" : e.ending; break;
+      case "plan": stage = Math.max(stage, 0); s.activity = `PLAN: ${(e.angles || []).map((a) => a.label).join(" · ")}`; break;
+      case "handoff": {
+        s.handoffs++; s.activity = `HANDOFF → ${e.peer}`;
+        const p = st[e.peer];
+        if (p) { p.assign = e.text || ""; if (p.status === "idle") p.status = "assigned"; }
+        stage = Math.max(stage, kindOf(e.peer || "") === "ver" ? 3 : 1);
+        break;
+      }
+      case "handback": s.handbacks++; s.activity = `HANDBACK ← ${e.peer}: ${e.text || ""}`; break;
+      case "merge": stage = Math.max(stage, 2); s.activity = `MERGE: ${e.text || ""}`; break;
+      case "report": stage = 4; s.activity = `REPORT: ${firstLine(e.text, 90)}`; s.status = e.status === "error" ? "error" : "complete"; break;
+    }
+    if (ENDINGS[e.event]) s.status = ENDINGS[e.event];
+  }
+  return { st, stage };
+}
+
+// --- Rendering -----------------------------------------------------------------
+
+function render(animate, prev = -1) {
+  const e = events[cur];
+  const { st, stage } = computeState(cur);
+
+  for (const name of agents) {
+    const s = st[name], el = nodes[name];
+    el.className = el.className.replace(/\bs-\w+/g, "").replace(/\b(active|peer)\b/g, "").trim() + ` s-${s.status}`;
+    if (name === e.agent) el.classList.add("active");
+    if (name === e.peer) el.classList.add("peer");
+    const turn = s.status === "working" && s.turn ? ` · turn ${s.turn}` : "";
+    el.querySelector(".stext").textContent = (STATUS_TEXT[s.status] || s.status) + turn;
+    el.querySelector(".activity span").textContent = s.activity || "—";
+    el.querySelector(".assign").textContent = s.assign ? `Assignment: ${s.assign}` : (name === "orchestrator" ? "Coordinates the run" : "Not started yet");
+    el.querySelector(".assign").title = s.assign;
+    const noun = kindOf(name) === "ver" ? "verdicts" : "candidates";
+    el.querySelector(".stats").textContent = name === "orchestrator"
+      ? `${s.handoffs} handoffs · ${s.handbacks} handbacks`
+      : `${s.calls} tool calls · ${s.items} ${noun} submitted`;
+  }
+
+  for (const [name, ed] of Object.entries(edges)) {
+    const s = st[name].status;
+    ed.line.classList.toggle("live", s === "working" || s === "assigned");
+    ed.line.classList.toggle("done", !["idle", "working", "assigned"].includes(s));
+  }
+
+  document.querySelectorAll("#stages li").forEach((li) => {
+    const n = +li.dataset.stage;
+    li.className = n < stage || stage === 4 ? "done" : n === stage ? "current" : "pending";
+  });
+
+  $("what").textContent = narrate(e);
+  $("why").textContent = WHY[e.event] || "";
+  $("scrub").value = cur;
+  const clock = new Date(e._t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  $("readout").textContent = `event ${cur + 1} / ${events.length} · ${elapsed(e)} · ${clock}`;
+  updateLog(prev);
+
+  if (animate && (e.event === "handoff" || e.event === "handback") && edges[e.peer]) {
+    flashEdge(e.peer, e.event === "handoff" ? "down" : "up");
+  }
+}
+
+function flashEdge(name, dir) {
+  const ed = edges[name], kind = kindOf(name);
+  const dur = Math.min(1100, Math.max(350, stepDelay() * 2.4));
+  ed.line.classList.add("flash");
+  ed.line.setAttribute(dir === "down" ? "marker-end" : "marker-start", `url(#arrow-${kind})`);
+  ed.label.textContent = dir === "down" ? "handoff ↓" : "handback ↑";
+  const [x1, y1, x2, y2] = dir === "down" ? [ed.x1, ed.y1, ed.x2, ed.y2] : [ed.x2, ed.y2, ed.x1, ed.y1];
+  const dot = document.createElementNS(SVG, "circle");
+  dot.setAttribute("r", 6);
+  dot.style.fill = `var(--${kind})`;
+  $("edges").appendChild(dot);
+  const t0 = performance.now();
+  (function step(t) {
+    const p = Math.min(1, (t - t0) / dur), k = p < .5 ? 2 * p * p : 1 - (-2 * p + 2) ** 2 / 2;
+    dot.setAttribute("cx", x1 + (x2 - x1) * k);
+    dot.setAttribute("cy", y1 + (y2 - y1) * k);
+    if (p < 1) requestAnimationFrame(step);
+    else {
+      dot.remove();
+      setTimeout(() => {
+        ed.line.classList.remove("flash");
+        ed.line.removeAttribute("marker-end");
+        ed.line.removeAttribute("marker-start");
+        ed.label.textContent = "";
+      }, 300);
+    }
+  })(t0);
+}
+
+// --- Playback ------------------------------------------------------------------
+
+function goTo(i, animate) {
+  const prev = cur;
+  cur = Math.max(0, Math.min(events.length - 1, i));
+  render(animate, prev);
+}
+
+function stepDelay() { return 1000 / +$("speed").value; }
+
+function tick() {
+  if (cur >= events.length - 1) return pause();
+  goTo(cur + 1, true);
+  // Linger on orchestrator milestones so handoffs are easy to follow.
+  const linger = MILESTONES.has(events[cur].event) ? 3 : 1;
+  timer = setTimeout(tick, stepDelay() * linger);
+}
+
+function play() {
+  if (!events.length) return;
+  if (cur >= events.length - 1) goTo(0, false);
+  playing = true;
+  $("playBtn").textContent = "⏸ Pause";
+  timer = setTimeout(tick, 150);
+}
+
+function pause() {
+  playing = false;
+  clearTimeout(timer);
+  $("playBtn").textContent = "▶ Play";
+}
+
+$("playBtn").addEventListener("click", () => (playing ? pause() : play()));
+$("fwdBtn").addEventListener("click", () => { pause(); goTo(cur + 1, true); });
+$("backBtn").addEventListener("click", () => { pause(); goTo(cur - 1, false); });
+$("startBtn").addEventListener("click", () => { pause(); goTo(0, false); });
+$("endBtn").addEventListener("click", () => { pause(); goTo(events.length - 1, false); });
+$("scrub").addEventListener("input", (e) => goTo(+e.target.value, false));
+
+document.addEventListener("keydown", (e) => {
+  if (!events.length || ["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName) && e.target.type !== "range") return;
+  if (e.key === " ") { e.preventDefault(); playing ? pause() : play(); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); pause(); goTo(cur + 1, true); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); pause(); goTo(cur - 1, false); }
+  else if (e.key === "Home") { pause(); goTo(0, false); }
+  else if (e.key === "End") { pause(); goTo(events.length - 1, false); }
+});
+
+if (EMBEDDED) parseRun(EMBEDDED.name, EMBEDDED.files);
+</script>
+</body>
+</html>
